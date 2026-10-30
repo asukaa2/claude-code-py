@@ -9,8 +9,12 @@ npm bundle. This project captures its core essence in pure Python:
 
 - **Agentic loop** — multi-turn chat with an LLM that can call tools to read,
   write, and edit files, run bash, search code, and track its own todos.
+- **Multiple LLM providers** — Anthropic (default), DeepSeek, Google Gemini,
+  HuggingFace, or any custom OpenAI-compatible endpoint. Swap providers at
+  runtime from the UI or CLI.
 - **Tool registry** — pluggable tools with JSON schemas, dispatched by the
-  agent loop based on ` ```tool_call` blocks the model emits.
+  agent loop based on native function-calling (when supported) or a
+  structured-output fallback (` ```tool_call` blocks the model emits).
 - **Permission policy** — allow / ask / deny classification for each tool call,
   with three quick presets in the UI (Yolo / Trust reads / Manual).
 - **Session persistence** — every conversation is JSON-serialized to disk;
@@ -18,23 +22,28 @@ npm bundle. This project captures its core essence in pure Python:
 - **CLI** — a `prompt_toolkit` + `rich` REPL with the same `/help`, `/mode`,
   `/tools`, `/clear`, `/exit` commands as the original.
 - **Gradio web UI** — chat, working-dir picker, mode selector, permission
-  preset, session manager, live tool-call log, todos panel, file browser,
-  and a settings tab — all in one page.
+  preset, **provider picker + API key + model fields**, session manager, live
+  tool-call log, todos panel, file browser, and a settings tab — all in one
+  page.
 
 ## Project layout
 
 ```
 .
-├── claude-code/             # the cloned reference repo (read-only)
 ├── claude_code_py/          # ← the Python port
 │   ├── __init__.py
-│   ├── config.py            # AgentConfig (model, perms, paths, limits)
-│   ├── llm.py               # LLMClient wrapping the `z-ai chat` CLI
+│   ├── config.py            # AgentConfig (provider, perms, paths, limits)
+│   ├── messages.py          # LLMMessage + LLMResponse (shared types)
+│   ├── llm.py               # LLMClient facade over the provider abstraction
 │   ├── prompts.py           # system prompt + tool-call protocol
 │   ├── permissions.py       # PermissionPolicy + PermissionDecision
 │   ├── session.py           # Session + SessionStore (JSON persistence)
 │   ├── agent.py             # the agentic loop + AgentEvent stream
 │   ├── cli.py               # prompt_toolkit REPL entry point
+│   ├── providers/
+│   │   ├── __init__.py              # ProviderConfig + KNOWN_PROVIDERS + factory
+│   │   ├── anthropic_provider.py    # native SDK + native tool-calling (default)
+│   │   └── openai_compat_provider.py# DeepSeek, Gemini, HuggingFace, Custom
 │   └── tools/
 │       ├── base.py          # Tool ABC + Registry + ToolContext + ToolResult
 │       ├── bash.py          # run shell commands
@@ -55,13 +64,39 @@ npm bundle. This project captures its core essence in pure Python:
 
 ## Quick start
 
-### 1. Run the web UI (recommended)
+### 1. Set your API key
+
+Pick the provider you want and export its key (or paste it in the UI later):
+
+```bash
+# Anthropic (default)
+export ANTHROPIC_API_KEY="sk-ant-…"
+
+# DeepSeek
+export DEEPSEEK_API_KEY="sk-…"
+
+# Google Gemini
+export GEMINI_API_KEY="AIza…"
+
+# HuggingFace
+export HF_TOKEN="hf_…"
+```
+
+### 2. Run the web UI (recommended)
 
 ```bash
 cd /home/z/my-project
 python webui.py --port 7860
 # then open http://localhost:7860
 ```
+
+In the sidebar:
+1. Pick a **Provider** (Anthropic is the default).
+2. The Model and Base URL fields auto-populate with sensible defaults; the API
+   key field shows which env var it reads from. Paste a key or rely on the env
+   var.
+3. Click **Apply provider**.
+4. Pick a working directory, set the permission preset, and start chatting.
 
 For a public Gradio share link:
 
@@ -78,6 +113,9 @@ The UI layout:
 │  - work dir  │  - input box                │  - todos         │
 │  - mode      │  - send/stop/clear          │  - file browser  │
 │  - perms     │                             │  - settings      │
+│  - PROVIDER  │                             │                  │
+│  - api key   │                             │                  │
+│  - model     │                             │                  │
 └──────────────┴─────────────────────────────┴──────────────────┘
 ```
 
@@ -89,38 +127,55 @@ The UI layout:
   / bash.
 - **Manual** — ask before every tool call that touches state.
 
-Because mid-run modal approval is awkward in Gradio, "ask" decisions are
-currently denied with a notice in the chat. Flip the preset and re-send.
-
 **Modes** (sidebar dropdown):
 - **Default** — balanced agentic behavior.
 - **Plan** — read-only investigation; produces a plan, waits for approval.
 - **Code** — action-oriented; prefer editing files over describing changes.
 - **Explain** — read-only; produce a clear explanation.
 
-### 2. Run the CLI
+### 3. Run the CLI
 
 ```bash
-PYTHONPATH=/home/z/my-project python -m claude_code_py.cli
-# or:
 PYTHONPATH=/home/z/my-project python -m claude_code_py.cli \
+    --provider anthropic \
+    --model claude-3-5-sonnet-latest \
     --working-dir /path/to/project \
-    --mode code \
-    --auto-approve-reads \
-    --max-iterations 25
+    --mode code
+
+# Or with a different provider:
+PYTHONPATH=/home/z/my-project python -m claude_code_py.cli \
+    --provider deepseek \
+    --model deepseek-chat
+
+PYTHONPATH=/home/z/my-project python -m claude_code_py.cli \
+    --provider gemini \
+    --model gemini-1.5-flash
+
+PYTHONPATH=/home/z/my-project python -m claude_code_py.cli \
+    --provider custom \
+    --base-url https://your-endpoint.com/v1 \
+    --model your-model \
+    --api-key sk-…
 ```
 
 REPL commands: `/help`, `/mode <default|plan|code|explain>`, `/tools`,
 `/clear`, `/exit`.
 
-### 3. Use the Python API directly
+### 4. Use the Python API directly
 
 ```python
-from claude_code_py import Agent, AgentConfig, EventType
+from claude_code_py import (
+    Agent, AgentConfig, ProviderConfig, EventType,
+)
 from claude_code_py.permissions import PermissionDecision
 
 cfg = AgentConfig(
     working_dir="/path/to/project",
+    provider=ProviderConfig(
+        provider="anthropic",                 # or deepseek/gemini/huggingface/custom
+        model="claude-3-5-sonnet-latest",
+        api_key="sk-ant-…",                   # or rely on ANTHROPIC_API_KEY
+    ),
     auto_approve_read_tools=True,
     auto_approve_write_tools=True,
     auto_approve_bash=False,
@@ -138,18 +193,36 @@ agent = Agent(cfg, permission_callback=lambda n, a: PermissionDecision.ALLOW)
 agent.run("Find all TODO comments in src/ and list them.", on_event=on_event)
 ```
 
+## Supported providers
+
+| Provider | Default model | Env var | Notes |
+|----------|---------------|---------|-------|
+| **Anthropic** (default) | `claude-3-5-sonnet-latest` | `ANTHROPIC_API_KEY` | Native SDK + native tool-calling |
+| **DeepSeek** | `deepseek-chat` | `DEEPSEEK_API_KEY` | OpenAI-compatible API |
+| **Google Gemini** | `gemini-1.5-flash` | `GEMINI_API_KEY` | OpenAI-compatible endpoint |
+| **HuggingFace** | `meta-llama/Llama-3.1-8B-Instruct` | `HF_TOKEN` | Inference endpoints (OpenAI-compat) |
+| **Custom** | (none) | (none) | Any OpenAI-compatible base_url + key |
+
+For providers that support native tool-calling (Anthropic, OpenAI-compatible
+backends), the agent passes the tools schema via the SDK's `tools=` parameter.
+For backends that don't, the agent falls back to the structured-output
+protocol: the model emits ` ```tool_call` blocks in prose, which the agent
+parses.
+
 ## How tool calling works
 
-The LLM backend is the bundled `z-ai chat` CLI (returns OpenAI-compatible
-JSON, model `glm-4-plus`). It does NOT expose native function-calling, so we
-implement tool-calling via a **structured-output protocol**:
-
-1. The system prompt instructs the model to emit tool calls as fenced
-   ` ```tool_call` blocks containing a JSON object with `name` and `arguments`.
-2. The agent loop parses those blocks (with a lenient JSON parser that
+1. The agent loop builds a JSON-schema list of all registered tools and passes
+   it to the provider via `tools=` (for providers that support it).
+2. If the provider returns native tool_calls, they are re-serialized into the
+   ` ```tool_call` fenced format so the agent's single dispatch path works
+   across every provider.
+3. If the provider doesn't support tools, the system prompt instructs the model
+   to emit tool calls as fenced ` ```tool_call` blocks containing a JSON object
+   with `name` and `arguments`.
+4. The agent loop parses those blocks (with a lenient JSON parser that
    tolerates trailing commas and `//` comments), dispatches them through the
    `Registry`, and appends a `tool`-role message with the real result.
-3. The loop continues until the model emits a response with no tool calls
+5. The loop continues until the model emits a response with no tool calls
    (the final answer), or the iteration cap is hit.
 
 The parser also accepts a fallback inline `[TOOL_CALL ...] ... [/TOOL_CALL]`
@@ -191,8 +264,7 @@ All knobs live in `claude_code_py.config.AgentConfig`. The most useful:
 
 | Field | Default | Notes |
 |-------|---------|-------|
-| `model` | `"glm-4-plus"` | Set by the `z-ai` CLI; informational. |
-| `llm_cli` | `"z-ai"` | CLI binary used to reach the LLM. |
+| `provider` | `ProviderConfig(provider="anthropic")` | LLM provider + key + model + base_url |
 | `max_iterations` | `25` | Hard cap on tool-call round-trips per turn. |
 | `mode` | `"default"` | One of `default` / `plan` / `code` / `explain`. |
 | `working_dir` | `cwd()` | Where file tools are rooted. |
@@ -203,17 +275,31 @@ All knobs live in `claude_code_py.config.AgentConfig`. The most useful:
 | `bash_timeout` | `120` | Per-command timeout in seconds. |
 | `sessions_dir` | `~/.claude_code_py/sessions` | Where session JSONs live. |
 
+`ProviderConfig` fields:
+
+| Field | Default | Notes |
+|-------|---------|-------|
+| `provider` | `"anthropic"` | One of: anthropic, deepseek, gemini, huggingface, custom |
+| `model` | (provider default) | Model name to send to the API. |
+| `api_key` | `""` | Falls back to the provider's env var if empty. |
+| `base_url` | (provider default) | Only editable for the `custom` provider. |
+| `native_tools` | `True` | Pass `tools=` to the API when supported. |
+| `max_tokens` | `4096` | Max tokens for the assistant response. |
+| `temperature` | `0.7` | Sampling temperature. |
+
 ## Dependencies
 
 - Python 3.10+
 - `gradio` (≥ 6) — for the web UI
 - `rich` + `prompt_toolkit` — for the CLI
+- `anthropic` — for the Anthropic provider (default)
+- `openai` — for the DeepSeek / Gemini / HuggingFace / Custom providers
 - `ripgrep` (`rg`) — for the grep tool
-- the bundled `z-ai` CLI — for the LLM backend
+- `httpx` — transitive, used by the SDKs
 
 See `requirements.txt`.
 
 ## License
 
 This Python port is for educational/demo purposes. The original Claude Code
-is © Anthropic under their license (see `claude-code/LICENSE.md`).
+is © Anthropic under their license.

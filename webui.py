@@ -37,6 +37,11 @@ from claude_code_py import (
     EventType,
     Session,
     SessionStore,
+    ProviderConfig,
+    KNOWN_PROVIDERS,
+    PROVIDER_IDS,
+    default_model_for,
+    env_key_for,
     get_default_config,
 )
 from claude_code_py.permissions import PermissionDecision
@@ -460,6 +465,97 @@ def h_set_perm_preset(preset: str):
     return banner
 
 
+# ---------------------------------------------------------------------- #
+# Provider handlers — switch LLM backend at runtime
+# ---------------------------------------------------------------------- #
+
+
+def _provider_label(pid: str) -> str:
+    for p in KNOWN_PROVIDERS:
+        if p["id"] == pid:
+            return p["label"]
+    return pid
+
+
+def h_set_provider(
+    provider_id: str,
+    api_key: str,
+    model: str,
+    base_url: str,
+):
+    """Apply provider settings and rebuild the agent's LLM client."""
+    pid = provider_id or "anthropic"
+    # Resolve the API key: explicit field > env var > empty.
+    env_var = env_key_for(pid)
+    resolved_key = (api_key or "").strip()
+    if not resolved_key and env_var:
+        import os
+        resolved_key = os.environ.get(env_var, "")
+    # Resolve model: explicit > provider default.
+    resolved_model = (model or "").strip() or default_model_for(pid)
+    # Resolve base_url: explicit > provider default (only for custom do we
+    # let the user type one).
+    resolved_base_url = (base_url or "").strip()
+    if not resolved_base_url:
+        for p in KNOWN_PROVIDERS:
+            if p["id"] == pid:
+                resolved_base_url = p.get("base_url", "")
+                break
+
+    STATE.config.provider = ProviderConfig(
+        provider=pid,
+        api_key=resolved_key,
+        model=resolved_model,
+        base_url=resolved_base_url,
+    )
+    # Rebuild the agent if it exists, so the next run() picks up the new
+    # provider immediately.
+    if STATE.agent is not None:
+        try:
+            STATE.agent.rebuild_llm()
+        except Exception as e:  # noqa: BLE001
+            return f'<div class="cc-stat err">provider error: {e}</div>'
+
+    masked = (resolved_key[:4] + "…" + resolved_key[-4:]) if len(resolved_key) > 8 else ("set" if resolved_key else "<none>")
+    banner = (
+        f'<div class="cc-stat info">provider: {_provider_label(pid)}</div>'
+        f'<div style="font-size:11px;color:{MUTED};margin-top:4px;">'
+        f'model: <code>{resolved_model or "(none)"}</code> · '
+        f'key: <code>{masked}</code>'
+        + (f' · base_url: <code>{resolved_base_url}</code>' if resolved_base_url else "")
+        + '</div>'
+    )
+    return banner
+
+
+def h_provider_defaults(provider_id: str):
+    """When the user picks a new provider, populate model + base_url defaults.
+
+    Returns updates for the model textbox, base_url textbox, and a hint about
+    which env var holds the API key.
+    """
+    pid = provider_id or "anthropic"
+    model = default_model_for(pid)
+    base_url = ""
+    env_var = env_key_for(pid)
+    for p in KNOWN_PROVIDERS:
+        if p["id"] == pid:
+            base_url = p.get("base_url", "")
+            break
+    hint = (
+        f"API key (env var: <code>{env_var}</code>)" if env_var
+        else "API key (no env var — type below)"
+    )
+    # For non-custom providers, base_url is read-only (we still show it as a
+    # hint, but the field is non-interactive). For custom, it's editable.
+    base_url_interactive = (pid == "custom")
+    return (
+        gr.update(value=model),
+        gr.update(value=base_url, interactive=base_url_interactive),
+        hint,
+    )
+
+
 def h_new_session():
     STATE.session = Session(
         working_dir=str(STATE.config.working_dir),
@@ -585,17 +681,20 @@ def h_list_files_browser(path: str):
 def h_apply_settings(
     max_iter: int,
     system_override: str,
-    enable_thinking: bool,
+    native_tools: bool,
     custom_bash_timeout: int,
+    max_tokens: int,
 ):
     STATE.config.max_iterations = int(max_iter)
-    STATE.config.enable_thinking = bool(enable_thinking)
+    STATE.config.provider.native_tools = bool(native_tools)
+    STATE.config.provider.max_tokens = int(max_tokens)
     STATE.config.bash_timeout = int(custom_bash_timeout)
     override = system_override.strip()
     STATE.config.system_prompt_override = override if override else None
     bits = [
         f"max_iterations={STATE.config.max_iterations}",
-        f"thinking={STATE.config.enable_thinking}",
+        f"native_tools={STATE.config.provider.native_tools}",
+        f"max_tokens={STATE.config.provider.max_tokens}",
         f"bash_timeout={STATE.config.bash_timeout}s",
     ]
     if override:
@@ -707,8 +806,9 @@ def h_load_settings_into_ui():
     return (
         STATE.config.max_iterations,
         STATE.config.system_prompt_override or "",
-        STATE.config.enable_thinking,
+        STATE.config.provider.native_tools,
         STATE.config.bash_timeout,
+        STATE.config.provider.max_tokens,
     )
 
 
@@ -726,8 +826,8 @@ def build_ui() -> gr.Blocks:
                 '<span class="sub">Agentic coding assistant · Gradio web UI</span>'
             )
             gr.HTML(
-                f'<span class="badge">model: {STATE.config.model}</span>'
-                f'<span class="badge">v0.1.0</span>'
+                f'<span class="badge">provider: {STATE.config.provider.provider}</span>'
+                f'<span class="badge">v0.2.0</span>'
             )
 
         with gr.Row(elem_id="cc-body"):
@@ -767,6 +867,37 @@ def build_ui() -> gr.Blocks:
                         label="Permission preset",
                         choices=[(lbl, val) for lbl, val in PERM_PRESETS],
                         value=STATE.perm_mode,
+                    )
+
+                with gr.Group(elem_classes="cc-panel"):
+                    gr.Markdown("### LLM provider")
+                    provider_dd = gr.Dropdown(
+                        label="Provider",
+                        choices=[(p["label"], p["id"]) for p in KNOWN_PROVIDERS],
+                        value=STATE.config.provider.provider,
+                        interactive=True,
+                    )
+                    api_key_tb = gr.Textbox(
+                        label="API key",
+                        type="password",
+                        placeholder="Paste key (or set env var)",
+                        value="",
+                        interactive=True,
+                    )
+                    model_tb = gr.Textbox(
+                        label="Model",
+                        value=STATE.config.provider.model,
+                        interactive=True,
+                    )
+                    base_url_tb = gr.Textbox(
+                        label="Base URL (custom only)",
+                        value=STATE.config.provider.base_url,
+                        interactive=(STATE.config.provider.provider == "custom"),
+                    )
+                    provider_apply_btn = gr.Button("Apply provider", size="sm", variant="primary")
+                    provider_hint = gr.Markdown(
+                        f"API key (env var: <code>{env_key_for('anthropic')}</code>)",
+                        elem_classes="cc-hint",
                     )
 
                 with gr.Group(elem_classes="cc-panel"):
@@ -831,9 +962,14 @@ def build_ui() -> gr.Blocks:
                             minimum=1, maximum=100, step=1,
                             value=STATE.config.max_iterations,
                         )
-                        s_thinking = gr.Checkbox(
-                            label="Enable thinking (chain-of-thought)",
-                            value=STATE.config.enable_thinking,
+                        s_native_tools = gr.Checkbox(
+                            label="Use native tool-calling (when provider supports it)",
+                            value=STATE.config.provider.native_tools,
+                        )
+                        s_max_tokens = gr.Slider(
+                            label="Max tokens per response",
+                            minimum=256, maximum=32768, step=256,
+                            value=STATE.config.provider.max_tokens,
                         )
                         s_bash_timeout = gr.Slider(
                             label="Bash timeout (seconds)",
@@ -863,6 +999,18 @@ def build_ui() -> gr.Blocks:
         mode_dd.change(h_set_mode, inputs=[mode_dd], outputs=[status_md])
         perm_radio.change(h_set_perm_preset, inputs=[perm_radio], outputs=[status_md])
 
+        # Provider wiring.
+        provider_dd.change(
+            h_provider_defaults,
+            inputs=[provider_dd],
+            outputs=[model_tb, base_url_tb, provider_hint],
+        )
+        provider_apply_btn.click(
+            h_set_provider,
+            inputs=[provider_dd, api_key_tb, model_tb, base_url_tb],
+            outputs=[status_md],
+        )
+
         new_btn.click(
             h_new_session,
             outputs=[chatbot, tool_log, todos_html, status_md, session_dd],
@@ -887,14 +1035,14 @@ def build_ui() -> gr.Blocks:
 
         s_apply_btn.click(
             h_apply_settings,
-            inputs=[s_max_iter, s_sys_override, s_thinking, s_bash_timeout],
+            inputs=[s_max_iter, s_sys_override, s_native_tools, s_bash_timeout, s_max_tokens],
             outputs=[s_status],
         )
 
         # Initial settings load on page load.
         ui.load(
             h_load_settings_into_ui,
-            outputs=[s_max_iter, s_sys_override, s_thinking, s_bash_timeout],
+            outputs=[s_max_iter, s_sys_override, s_native_tools, s_bash_timeout, s_max_tokens],
         )
         ui.load(h_refresh_sessions, outputs=[session_dd])
 

@@ -1,5 +1,6 @@
 gradio>=6.0
 rich>=13.0
 prompt_toolkit>=3.0
+anthropic>=0.40
+openai>=1.0
 # ripgrep (rg) must be on PATH for the grep tool — install via your OS package manager.
-# The `z-ai` CLI must be on PATH for the LLM backend — preinstalled in this environment.

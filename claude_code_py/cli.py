@@ -40,6 +40,27 @@ def _make_parser() -> argparse.ArgumentParser:
         help="Agent mode (default: default).",
     )
     p.add_argument(
+        "--provider",
+        choices=["anthropic", "deepseek", "gemini", "huggingface", "custom"],
+        default="anthropic",
+        help="LLM provider (default: anthropic).",
+    )
+    p.add_argument(
+        "--model",
+        default=None,
+        help="Model name (defaults to the provider's default).",
+    )
+    p.add_argument(
+        "--api-key",
+        default=None,
+        help="API key for the provider (defaults to the matching env var).",
+    )
+    p.add_argument(
+        "--base-url",
+        default=None,
+        help="Custom base URL (only used by --provider=custom).",
+    )
+    p.add_argument(
         "--auto-approve-bash", action="store_true",
         help="Auto-approve all bash commands (skip the y/N prompt).",
     )
@@ -121,9 +142,24 @@ def main(argv: list[str] | None = None) -> int:
         console.print(f"[red]Working directory not found: {working_dir}[/]")
         return 2
 
+    # Build the provider config from CLI args. API key/model fall back to the
+    # provider's defaults and matching env vars when not given explicitly.
+    from .providers import ProviderConfig, default_model_for, env_key_for
+    import os
+    env_var = env_key_for(args.provider)
+    api_key = args.api_key or (os.environ.get(env_var) if env_var else "")
+    model = args.model or default_model_for(args.provider)
+    provider_cfg = ProviderConfig(
+        provider=args.provider,
+        api_key=api_key or "",
+        model=model,
+        base_url=args.base_url or "",
+    )
+
     config = AgentConfig(
         working_dir=working_dir,
         mode=args.mode,
+        provider=provider_cfg,
         auto_approve_bash=args.auto_approve_bash,
         auto_approve_write_tools=args.auto_approve_writes,
         max_iterations=args.max_iterations,
@@ -132,6 +168,7 @@ def main(argv: list[str] | None = None) -> int:
     console.print(Panel.fit(
         f"[bold]Claude Code (Python edition)[/]\n"
         f"working dir: [cyan]{working_dir}[/]\n"
+        f"provider: [cyan]{args.provider}[/]  model: [cyan]{model or '(none)'}[/]\n"
         f"mode: [cyan]{args.mode}[/]    tools: {', '.join(default_registry().names())}\n"
         f"\nType your request, or [bold]/exit[/] to quit.",
         border_style="magenta",

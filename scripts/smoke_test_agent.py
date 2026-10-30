@@ -1,10 +1,39 @@
-"""End-to-end smoke test for the agent: ask it to list files in /tmp."""
-from claude_code_py import Agent, AgentConfig, AgentEvent, EventType
+"""End-to-end smoke test for the agent.
+
+Uses whichever provider has an API key in the environment (checks Anthropic
+first, then DeepSeek, Gemini, HuggingFace). Skips with a clear message if
+no key is set.
+"""
+import os
+import sys
+
+from claude_code_py import Agent, AgentConfig, AgentEvent, EventType, ProviderConfig
 from claude_code_py.permissions import PermissionDecision
 
-# Auto-approve everything for the smoke test.
+# Pick the first provider with a key in the env.
+PROVIDER_CANDIDATES = [
+    ("anthropic", "ANTHROPIC_API_KEY", "claude-3-5-sonnet-latest"),
+    ("deepseek", "DEEPSEEK_API_KEY", "deepseek-chat"),
+    ("gemini", "GEMINI_API_KEY", "gemini-1.5-flash"),
+    ("huggingface", "HF_TOKEN", "meta-llama/Llama-3.1-8B-Instruct"),
+]
+chosen = None
+for pid, env_var, model in PROVIDER_CANDIDATES:
+    if os.environ.get(env_var):
+        chosen = (pid, env_var, model)
+        break
+if chosen is None:
+    print("SKIP: no provider API key found in env. Set one of:")
+    for _, env_var, _ in PROVIDER_CANDIDATES:
+        print(f"  export {env_var}=…")
+    sys.exit(0)
+
+pid, env_var, model = chosen
+print(f"Using provider: {pid} (model {model}, key from ${env_var})")
+
 cfg = AgentConfig(
     working_dir="/home/z/my-project",
+    provider=ProviderConfig(provider=pid, model=model),
     auto_approve_read_tools=True,
     auto_approve_write_tools=True,
     auto_approve_bash=True,

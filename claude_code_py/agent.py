@@ -94,7 +94,9 @@ class Agent:
     ) -> None:
         self.config = config
         self.session = session or Session(working_dir=str(config.working_dir), mode=config.mode)
-        self.llm = LLMClient(config)
+        # LLMClient now wraps a ProviderConfig; rebuilt whenever the user
+        # swaps providers in the UI (see `rebuild_llm`).
+        self.llm = LLMClient(config.provider)
         self.registry = default_registry()
         self.policy = PermissionPolicy(config)
         # Default permission callback: deny anything that needs asking. The
@@ -126,9 +128,13 @@ class Agent:
 
         final_text = ""
         for iteration in range(self.config.max_iterations):
-            messages = self._build_llm_messages(system_prompt)
+            # The new LLMClient takes (messages, system_prompt, tools_schema).
+            # We pass the tools schema so providers with native tool-calling
+            # (Anthropic, OpenAI-compat) can use it; others ignore it.
+            messages = list(self.session.messages)  # no system prefix
+            tools_schema = self._build_tools_schema()
             try:
-                resp = self.llm.complete(messages)
+                resp = self.llm.complete(messages, system_prompt, tools_schema)
             except Exception as e:  # noqa: BLE001
                 emit(EventType.ERROR, {"message": f"LLM call failed: {e}"})
                 return final_text
@@ -248,11 +254,29 @@ class Agent:
         """Call between user turns to clear turn-local state (e.g. todos)."""
         self._current_turn_state = {}
 
-    def _build_llm_messages(self, system_prompt: str) -> list[LLMMessage]:
-        """Build the message list for the LLM, prepending the system prompt."""
-        msgs: list[LLMMessage] = [LLMMessage(role="system", content=system_prompt)]
-        msgs.extend(self.session.messages)
-        return msgs
+    def rebuild_llm(self) -> None:
+        """Rebuild the LLM client after `config.provider` has been mutated.
+
+        Called by the web UI when the user swaps providers / models / keys.
+        """
+        self.llm = LLMClient(self.config.provider)
+
+    def _build_tools_schema(self) -> list[dict]:
+        """Build a JSON-schema list describing all registered tools.
+
+        Passed to providers that support native tool-calling. Format is
+        Anthropic/OpenAI-compatible: each entry has name, description, and
+        input_schema/parameters.
+        """
+        schema: list[dict] = []
+        for name in self.registry.names():
+            t = self.registry.get(name)
+            schema.append({
+                "name": t.name,
+                "description": t.description,
+                "input_schema": t.schema or {"type": "object", "properties": {}},
+            })
+        return schema
 
     def _parse_tool_calls(self, content: str) -> list[dict[str, Any]]:
         """Extract tool_call blocks from the model's response.
