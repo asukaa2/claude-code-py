@@ -1099,7 +1099,7 @@ def main() -> None:
         share=args.share,
         inbrowser=False,
         css=CSS,
-        theme=gr.themes.Soft(),
+        theme=gr.themes.Base(),
     )
 
 
