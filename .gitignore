@@ -1,0 +1,50 @@
+# === SECRETS — never commit ===
+.env
+.env.*
+*.pem
+*.key
+secrets/
+
+# === Reference clone (Anthropic's claude-code, cloned for study) ===
+# Excluded to keep this repo focused on our Python port.
+claude-code/
+
+# === Z.ai skills (not part of this project) ===
+skills/
+
+# === User uploads & generated deliverables ===
+upload/
+download/
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# === Runtime state ===
+.claude_code_py/
+*.session.json
+sessions/
+
+# === IDE / OS ===
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# === Node (in case) ===
+node_modules/
+
+# === Logs ===
+*.log
+/tmp/
